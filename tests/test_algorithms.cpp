@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "algorithms.hpp"
+#include <algorithm>
 
 TEST(AlgorithmsTest, RankIndicesTest) {
   // Test the rankIndices function
