@@ -7,9 +7,6 @@
 
 extern float DEVELOPER_mi_cutoff;
 
-static float q_thresh;
-static uint16_t size_thresh;
-
 /**
  * @brief Calculate the Mutual Information (MI) for a square struct.
  *
@@ -42,13 +39,18 @@ float calcMI(const square &s) {
  * @param x_ptr Pointer to the x-coordinate data.
  * @param y_ptr Pointer to the y-coordinate data.
  * @param s The square struct on which to perform a tessellation.
+ * @param q_thresh A threshold for chi-square, passed down unchanged
+ * through the whole recursion (see calcAPMI()).
+ * @param size_thresh A threshold for minimum partition size, passed down
+ * unchanged through the whole recursion (see calcAPMI()).
  *
  * @return A float value representing the result of MI calculations, or
  * performs
  * recursion, depending on the condition.
  */
 const float calcAPMISplit(const float *const x_ptr, const float *const y_ptr,
-                          const square s) {
+                          const square s, const float q_thresh,
+                          const uint16_t size_thresh) {
   // if we have less points in the square than size_thresh, calc MI
   if (s.num_pts < size_thresh) {
     return calcMI(s);
@@ -102,8 +104,10 @@ const float calcAPMISplit(const float *const x_ptr, const float *const y_ptr,
         tl{s.x_bound1, y_thresh,   s.width * 0.5f,
            tl_pts,     tl_num_pts, s.tot_num_pts};
 
-    return calcAPMISplit(x_ptr, y_ptr, tr) + calcAPMISplit(x_ptr, y_ptr, br) +
-           calcAPMISplit(x_ptr, y_ptr, bl) + calcAPMISplit(x_ptr, y_ptr, tl);
+    return calcAPMISplit(x_ptr, y_ptr, tr, q_thresh, size_thresh) +
+           calcAPMISplit(x_ptr, y_ptr, br, q_thresh, size_thresh) +
+           calcAPMISplit(x_ptr, y_ptr, bl, q_thresh, size_thresh) +
+           calcAPMISplit(x_ptr, y_ptr, tl, q_thresh, size_thresh);
   } else {
     // if we don't partition, then we calc MI
     return calcMI(s);
@@ -122,10 +126,6 @@ const float calcAPMISplit(const float *const x_ptr, const float *const y_ptr,
  */
 float calcAPMI(const std::vector<float> &x_vec, const std::vector<float> &y_vec,
                const float q_thresh, const uint16_t size_thresh) {
-  // Set file static variables
-  ::size_thresh = size_thresh;
-  ::q_thresh = q_thresh;
-
   uint16_t tot_num_pts = x_vec.size();
 
   uint16_t *all_pts = (uint16_t *)alloca(tot_num_pts * sizeof(uint16_t));
@@ -139,7 +139,17 @@ float calcAPMI(const std::vector<float> &x_vec, const std::vector<float> &y_vec,
   std::copy(x_vec.begin(), x_vec.end(), x_ptr);
   std::copy(y_vec.begin(), y_vec.end(), y_ptr);
 
-  return calcAPMISplit(x_ptr, y_ptr, init);
+  // q_thresh/size_thresh are passed down explicitly through the whole
+  // calcAPMISplit() recursion (see that function) rather than through
+  // shared mutable state -- calcAPMI() is called concurrently from
+  // OpenMP-parallelized loops elsewhere in the codebase (subnet_
+  // operations.cpp's regulator x target loop, apmi_nullmodel.cpp's
+  // null-model bootstrap), and file-static globals here (even
+  // thread_local ones) would remain a latent hazard if this recursion is
+  // ever itself parallelized in the future (e.g. via nested OpenMP
+  // tasks) -- explicit parameters have no such hazard regardless of how
+  // this function is called.
+  return calcAPMISplit(x_ptr, y_ptr, init, q_thresh, size_thresh);
 }
 
 /** @brief Ranks indices based on the values in vec.

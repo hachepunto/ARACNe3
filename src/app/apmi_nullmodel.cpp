@@ -64,15 +64,34 @@ APMINullModel::APMINullModel(const uint32_t n_nulls,
     for (uint16_t i = 1U; i <= tot_num_subsample; ++i)
       ref_vec.emplace_back(((float)i) / (tot_num_subsample + 1));
 
-    std::vector<float> shuffle_vec = ref_vec;
-
     this->null_mis = std::vector<float>(n_nulls);
 
-#pragma omp parallel for num_threads(nthreads)
-    for (uint32_t i = 0U; i < n_nulls; ++i) {
+    // shuffle_vec used to be a single vector shared across all threads:
+    // the #pragma omp critical below correctly serialized the *shuffle*
+    // (and the shared `rand` generator), but the following
+    // calcAPMI(ref_vec, shuffle_vec) read it *outside* that critical
+    // section -- so one thread could read shuffle_vec while another
+    // thread was concurrently re-shuffling the very same object. That's
+    // a data race with no guaranteed crash: it can silently corrupt
+    // individual null-MI draws, which calibrate the p-value thresholds
+    // used to keep/drop edges genome-wide.
+    //
+    // Fix: give each OpenMP thread its own persistent copy, declared once
+    // per thread (not once per iteration, which would mean up to n_nulls
+    // -- often 1,000,000 -- reallocations instead of nthreads). Same
+    // pattern as pruneMaxEnt's local_edges_to_remove in
+    // subnet_operations.cpp: a #pragma omp parallel block holding the
+    // thread-private variable, with a #pragma omp for splitting the
+    // iterations across threads.
+#pragma omp parallel num_threads(nthreads)
+    {
+      std::vector<float> shuffle_vec = ref_vec;
+#pragma omp for
+      for (uint32_t i = 0U; i < n_nulls; ++i) {
 #pragma omp critical
-      { std::shuffle(shuffle_vec.begin(), shuffle_vec.end(), rand); }
-      null_mis[i] = calcAPMI(ref_vec, shuffle_vec);
+        { std::shuffle(shuffle_vec.begin(), shuffle_vec.end(), rand); }
+        null_mis[i] = calcAPMI(ref_vec, shuffle_vec);
+      }
     }
 
     // sort largest to smallest
